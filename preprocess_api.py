@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import decord
 import argparse
+import torch
 from moviepy.editor import VideoFileClip, AudioFileClip
 from tqdm import tqdm
 from src.models.dwpose.dwpose_detector import dwpose_detector as dwprocessor
@@ -17,6 +18,23 @@ class VideoPreprocessor:
             max_size (int): Maximum size for video frame processing
         """
         self.MAX_SIZE = max_size
+        self.device = 'cpu'
+
+    def to(self, device: str):
+        """
+        Move preprocessor to specified device
+        
+        Args:
+            device (str): Device to move to ('cpu' or 'cuda:X')
+            
+        Returns:
+            VideoPreprocessor: Self for chaining
+        """
+        self.device = device
+        # Move DWPose detector to device if it exists
+        if hasattr(dwprocessor, 'to'):
+            dwprocessor.to(device)
+        return self
 
     def _sanitize_filename(self, filename: str) -> str:
         """
@@ -141,23 +159,38 @@ class VideoPreprocessor:
         vr = decord.VideoReader(video_path, ctx=decord.cpu(0))
         sample_stride *= max(1, int(vr.get_avg_fps() / 24))
         
-        frames = vr.get_batch(list(range(0, len(vr), sample_stride))).asnumpy()
-        
+        # Calculate frame indices
+        frame_indices = list(range(0, len(vr), sample_stride))
         if max_frame is not None:
-            frames = frames[0:max_frame,:,:]
+            frame_indices = frame_indices[:max_frame]
             
+        # Get frames batch
+        frames = vr.get_batch(frame_indices).asnumpy()
         height, width, _ = frames[0].shape
         
         detected_poses = []
         for i, frm in enumerate(tqdm(frames, desc="DWPose")):
             try:
+                # Keep frame as numpy array for DWPose processing
+                # DWPose detector will handle device placement internally
                 pose = dwprocessor(frm)
                 if pose:
                     detected_poses.append(pose)
+                    
+                # Break if we've reached max_frame
+                if max_frame is not None and len(detected_poses) >= max_frame:
+                    break
+                    
             except Exception as e:
                 print(f"Error detecting pose for frame {i}: {str(e)}")
+                import traceback
+                traceback.print_exc()
                 
-        dwprocessor.release_memory()
+        # Clear GPU memory if needed
+        if self.device != 'cpu':
+            dwprocessor.release_memory()
+            torch.cuda.empty_cache()
+            
         return detected_poses, height, width, frames
 
     def get_pose_params(self, detected_poses: List[Dict], height: int, width: int) -> Optional[Dict]:
@@ -355,7 +388,8 @@ class VideoPreprocessor:
                      output_dir: str,
                      target_fps: int = 24,
                      save_frames: bool = True,
-                     save_audio: bool = True) -> Dict:
+                     save_audio: bool = True,
+                     max_duration: Optional[float] = None) -> Dict:
         """
         Process a video file or bytes stream.
         
@@ -365,6 +399,7 @@ class VideoPreprocessor:
             target_fps: Target frames per second
             save_frames: Whether to save individual frames
             save_audio: Whether to extract and save audio
+            max_duration: Maximum duration in seconds to process
             
         Returns:
             Dict containing paths to processed files and parameters
@@ -378,21 +413,48 @@ class VideoPreprocessor:
             if not os.path.exists(input_video):
                 raise FileNotFoundError(f"Input video file not found: {input_video}")
             input_video_path = input_video
-            # Create output directory structure
+
+        # Create output directory structure
         video_name = self._get_video_name(input_video_path)
         dirs = self._create_video_dirs(output_dir, video_name)
         
+        # Calculate frame limits based on max_duration
+        orig_video = VideoFileClip(input_video_path)
+        orig_duration = orig_video.duration
+        max_frames = None
+        
+        if max_duration is not None and orig_duration > max_duration:
+            print(f"Trimming video from {orig_duration:.2f}s to {max_duration:.2f}s")
+            max_frames = int(max_duration * target_fps)
+            # Create trimmed version of video
+            trimmed_video_path = os.path.join(dirs['video_dir'], f"{video_name}_trimmed.mp4")
+            trimmed_clip = orig_video.subclip(0, max_duration)
+            trimmed_clip.write_videofile(trimmed_video_path, codec='libx264', audio_codec='aac')
+            orig_video.close()
+            trimmed_clip.close()
+            input_video_path = trimmed_video_path
+
         # Convert video FPS
         converted_video = os.path.join(dirs['video_dir'], f"{video_name}_converted.mp4")
         self.convert_fps(input_video_path, converted_video, target_fps)
 
-        # Extract pose information
-        detected_poses, height, width, frames = self.get_video_pose(converted_video)
+        # Extract pose information with frame limit
+        detected_poses, height, width, frames = self.get_video_pose(
+            converted_video, 
+            max_frame=max_frames
+        )
+        
+        # Verify we have enough poses
+        if not detected_poses:
+            raise ValueError("No poses detected in video")
+            
+        if max_frames is not None and len(detected_poses) < max_frames:
+            print(f"Warning: Only detected {len(detected_poses)} poses, expected {max_frames}")
         
         # Save frames if requested
         frame_paths = []
         if save_frames:
-            frame_paths = self.save_frames(frames, dirs['frames_dir'])
+            frame_paths = self.save_frames(frames[:max_frames] if max_frames else frames, dirs['frames_dir'])
         
         # Get pose parameters
         res_params = self.get_pose_params(detected_poses, height, width)
@@ -412,6 +474,8 @@ class VideoPreprocessor:
         if save_audio:
             audio_path = os.path.join(dirs['audio_dir'], f"{video_name}_audio.wav")
             video = VideoFileClip(converted_video)
+            if max_duration is not None:
+                video = video.subclip(0, max_duration)
             video.audio.write_audiofile(audio_path)
             video.close()
 
@@ -426,7 +490,9 @@ class VideoPreprocessor:
             'frame_paths': frame_paths if save_frames else None,
             'pose_dir': dirs['pose_dir'],
             'audio_path': audio_path,
-            'params': res_params
+            'params': res_params,
+            'num_frames': len(detected_poses),
+            'duration': max_duration if max_duration else orig_duration
         }
 
 
@@ -455,26 +521,42 @@ def main():
     parser.add_argument('--no-audio', 
                        action='store_true', 
                        help='Skip audio extraction')
-    parser.add_argument('--sample-stride', 
-                       type=int, 
-                       default=1, 
-                       help='Frame sampling stride for pose detection')
-    parser.add_argument('--max-frame', 
-                       type=int, 
-                       default=None, 
-                       help='Maximum number of frames to process')
+    parser.add_argument('--max-duration',
+                       type=float,
+                       default=None,
+                       help='Maximum duration in seconds to process')
+    parser.add_argument('--use-gpu',
+                       action='store_true',
+                       help='Use GPU for processing')
     
     args = parser.parse_args()
     
     try:
+        # Initialize preprocessor
         preprocessor = VideoPreprocessor(max_size=args.max_size)
+        
+        # Move to GPU if requested
+        if args.use_gpu:
+            if torch.cuda.is_available():
+                preprocessor = preprocessor.to('cuda:0')
+                print("Using GPU for processing")
+            else:
+                print("Warning: GPU requested but not available. Using CPU instead.")
+        
+        # Process video
         results = preprocessor.process_video(
             input_video=args.input_video,
             output_dir=args.output_dir,
             target_fps=args.target_fps,
             save_frames=not args.no_frames,
-            save_audio=not args.no_audio
+            save_audio=not args.no_audio,
+            max_duration=args.max_duration
         )
+        
+        # Move back to CPU and clear GPU memory if needed
+        if args.use_gpu and torch.cuda.is_available():
+            preprocessor = preprocessor.to('cpu')
+            torch.cuda.empty_cache()
         
         print("\nProcessing completed successfully!")
         print(f"Results saved to: {results['video_dir']}")
@@ -485,6 +567,8 @@ def main():
         print(f"- Pose directory: {results['pose_dir']}")
         if results['audio_path']:
             print(f"- Audio file: {results['audio_path']}")
+        print(f"\nProcessed {results['num_frames']} frames")
+        print(f"Video duration: {results['duration']:.2f}s")
             
     except Exception as e:
         print(f"\nError during processing: {str(e)}")
@@ -495,17 +579,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# Basic usage
-"""
-python preprocess_calls.py /home/hertzai2019/AnimateX/YoutubeScrapper/Youtube_crawled/-1DYsiKC7b4_scene_073.mp4 /home/hertzai2019/AnimateX/echomimic_v2/EMTD_dataset/processed_data
-"""
-# Advanced usage with options
-"""
-python preprocess_calls.py input.mp4 output_dir \
-    --target-fps 30 \
-    --max-size 1024 \
-    --no-frames \
-    --sample-stride 2 \
-    --max-frame 1000
-"""

@@ -1,1 +1,8 @@
 pretrained_weights/
+EMTD_dataset/
+temp_processing/
+permanent_storage/
+logs/
+storage/
+cache/
+__pycache__/
