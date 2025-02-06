@@ -425,11 +425,19 @@ class VideoPreprocessor:
         
         if max_duration is not None and orig_duration > max_duration:
             print(f"Trimming video from {orig_duration:.2f}s to {max_duration:.2f}s")
-            max_frames = int(max_duration * target_fps)
+            # Calculate exact frame count on duration
+            max_frames = int(np.ceil(max_duration * target_fps))
+            # Adjust max_duration to align with frame boundaries
+            max_duration = max_frames / target_fps
+            print(f"Adjusted duration to {max_duration:.3f}s for frame alognment")
             # Create trimmed version of video
             trimmed_video_path = os.path.join(dirs['video_dir'], f"{video_name}_trimmed.mp4")
             trimmed_clip = orig_video.subclip(0, max_duration)
-            trimmed_clip.write_videofile(trimmed_video_path, codec='libx264', audio_codec='aac')
+            trimmed_clip.write_videofile(trimmed_video_path, 
+                                         codec='libx264', 
+                                         audio_codec='aac',
+                                         fps = target_fps,
+                                         preset='slow')
             orig_video.close()
             trimmed_clip.close()
             input_video_path = trimmed_video_path

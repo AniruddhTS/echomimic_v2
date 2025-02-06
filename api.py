@@ -454,7 +454,6 @@ class InferenceManager:
         audio_clip = None
         video_clip = None
         response_data = {}
-        base_url = "http://34.64.120.240:8000"
 
         
         try:
@@ -462,6 +461,9 @@ class InferenceManager:
 
             # Process reference image if provided, otherwise use static reference
             if reference_image:
+                original_ref_bytes = await reference_image.read()
+                # Reset file position for subsequent processing
+                await reference_image.seek(0)
                 logger.info("Processing user-provided reference image...")
                 ref_result = await self.ref_image_manager.process_reference_image(reference_image)
                 reference_path = ref_result['path']
@@ -485,10 +487,18 @@ class InferenceManager:
             audio_path = session_dirs['preprocess'] / "audio.wav"
             with audio_path.open("wb") as f:
                 shutil.copyfileobj(audio_file.file, f)
+            
+            with open(audio_path, "rb") as f:
+                audio_bytes = f.read()
 
             # Check audio duration
             audio_clip = AudioFileClip(str(audio_path))
             audio_duration = audio_clip.duration
+
+            logger.info(f"Audio file: {audio_file.filename}")
+            logger.info(f"Audio duration: {audio_duration:.3f}s")
+            logger.info(f"Audio sample rate: {audio_clip.fps}Hz")
+            logger.info(f"Audio channels: {1 if audio_clip.nchannels == 1 else 'Stereos'}")
             
             MAX_AUDIO_DURATION = 25  # Maximum allowed duration in seconds
             if audio_duration > MAX_AUDIO_DURATION:
@@ -658,11 +668,15 @@ class InferenceManager:
                     'using_custom_reference': True
                 })
             else:
+
+                                
                 response_data.update({
-                    'source_data': reference_bytes,
+                    'source_data': original_ref_bytes,
                     'driving_video_data': driving_video_bytes,
                     'source_content_type': 'image/png',
-                    'using_custom_reference': False
+                    'using_custom_reference': False,
+                    'audio_data': audio_bytes,
+                    'audio_content_type': 'audio/wav'
                 })
             
             # Add metadata
@@ -725,7 +739,7 @@ class FlaskAPIClient:
     def __init__(self, flask_api_url: str = 'http://34.64.120.240:5000'):
         self.base_url = flask_api_url
     
-    async def send_for_animation(self, source_data: bytes, driving_data: bytes, source_is_image: bool) -> str:
+    async def send_for_animation(self, source_data: bytes, driving_data: bytes, source_is_image: bool, audio_data: Optional[bytes] = None) -> str:
         """
         Send videos/images data directly to Flask API for animation processing
         
@@ -750,6 +764,12 @@ class FlaskAPIClient:
                                    source_data,
                                    filename='source_image.png',
                                    content_type='image/png')
+                    if audio_data:
+                        logger.info("Adding audio data to request")
+                        data.add_field('audio_data',
+                                       audio_data,
+                                       filename='audio.wav',
+                                       content_type='audio/wav')
                 else:
                     logger.info("Sending source as video")
                     data.add_field('source_video',
@@ -1120,11 +1140,13 @@ async def generate_animated_video(
 
         source_data = initial_result.get('source_video_data' if initial_result.get('using_custom_reference') else 'source_data')
         driving_data = initial_result.get('driving_video_data')
+        audio_data = initial_result.get('audio_data')
         source_is_image = initial_result.get('source_content_type') == 'image/png'
         animated_video_url = await flask_client.send_for_animation(
             source_data,
             driving_data,
-            source_is_image
+            source_is_image,
+            audio_data if source_is_image else None
         )
         logger.info("Animation Complete")
         return {'animated_video_url': animated_video_url}

@@ -6,3 +6,5 @@ logs/
 storage/
 cache/
 __pycache__/
+src/models/dwpose/dw-ll_ucoco_384.onnx
+src/models/dwpose/yolox_l.onnx
