@@ -736,7 +736,7 @@ class InferenceManager:
                 logger.error(f"Error during cleanup: {str(e)}")
 
 class FlaskAPIClient:
-    def __init__(self, flask_api_url: str = 'http://34.64.120.240:5000'):
+    def __init__(self, flask_api_url: str = 'http://localhost:5000'):
         self.base_url = flask_api_url
     
     async def send_for_animation(self, source_data: bytes, driving_data: bytes, source_is_image: bool, audio_data: Optional[bytes] = None) -> str:
@@ -933,7 +933,7 @@ async def generate_video(
             seed=seed
         )
 
-        base_url = "http://34.64.120.240:8000"
+        base_url = "http://localhost:8000"
         
         # Simplify response based on hand detection
         if result.get('using_custom_reference', False):
