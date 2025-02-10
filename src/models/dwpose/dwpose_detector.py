@@ -2,7 +2,7 @@ import os
 
 import numpy as np
 import torch
-
+from pathlib import Path
 from .wholebody import Wholebody
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -60,9 +60,21 @@ class DWposeDetector:
             pose = dict(bodies=bodies, hands=hands, hands_score=hands_score, faces=faces, faces_score=faces_score)
 
             return pose
+        
+current_dir = Path(__file__).resolve().parent
+
+# For Docker container
+pretrained_weights_dir = Path("usr/app/pretrained_weights")
+model_det_path = pretrained_weights_dir / "yolox_l.onnx"
+model_pose_path = pretrained_weights_dir / "dw-ll_ucoco_384.onnx"
+
+# For local usage 
+# pointing to the pretrained_weights directory
+# model_det_path = "/home/hertzai2019/AnimateX/echomimic_v2/pretrained_weights/yolox_l.onnx"
+# model_pose_path = "/home/hertzai2019/AnimateX/echomimic_v2/pretrained_weights/dw-ll_ucoco_384.onnx"
 
 dwpose_detector = DWposeDetector(
-    model_det="your_path_to_yolox_l.onnx",
-    model_pose="your_path_to_dw-ll_ucoco_384.onnx",
+    model_det=str(model_det_path),
+    model_pose=str(model_pose_path),
     device=device)
 print('dwpose_detector init ok', device)
