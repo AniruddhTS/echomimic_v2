@@ -64,7 +64,7 @@ class DWposeDetector:
 current_dir = Path(__file__).resolve().parent
 
 # For Docker container
-pretrained_weights_dir = Path("usr/app/pretrained_weights")
+pretrained_weights_dir = Path("/usr/app/pretrained_weights")
 model_det_path = pretrained_weights_dir / "yolox_l.onnx"
 model_pose_path = pretrained_weights_dir / "dw-ll_ucoco_384.onnx"
 
