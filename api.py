@@ -1125,7 +1125,7 @@ async def generate_animated_video(
         logger.info("Generating initial video...")
         initial_result = await inference_manager.process_inputs(
             audio_file,
-            "../YoutubeScrapper/Youtube_crawled/summary.json",
+            "Youtube_crawled/summary.json",
             reference_image=reference_image,
             fps=fps,
             steps=steps,
