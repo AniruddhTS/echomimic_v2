@@ -1,9 +1,9 @@
 pretrained_weights/
 EMTD_dataset/
 temp_processing/
-permanent_storage/
+permanent_storage/*
 logs/
-storage/
+storage/*
 cache/
 __pycache__/
 src/models/dwpose/dw-ll_ucoco_384.onnx

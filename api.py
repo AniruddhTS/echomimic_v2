@@ -137,7 +137,7 @@ class VideoProcessor:
         )
     def crop_video_at_shoulders(self, video_path: str, output_path: str) ->bool:
         """
-        Crop video to portrait format focusing on face and upper body.
+        Crop video to focus on upper body using MediaPipe pose landmarks to detect shoulders.
         Returns True if successful, False otherwise.
         """
         try:
@@ -152,40 +152,93 @@ class VideoProcessor:
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             fps = int(cap.get(cv2.CAP_PROP_FPS))
 
-            # Calculate zoop crop dimensions
-            # We want to zoom in by about 40%
-            zoom_factor = 1.4
+            # Sample frames to find shoulder position
+            shoulder_postions = []
+            sample_count = 0
+            max_samples = 20 # Sampling upto 20 frames to get reliable shoulder positions
 
-            # Calculate new dimensions after zoom
-            crop_height = int(height / zoom_factor)
-            crop_width = int(width / zoom_factor)
+            while sample_count < max_samples:
+                ret, frame = cap.read()
+                if not ret:
+                    break
 
-            # Calculate crop coordinates to center the frame
-            # We want to crop slightly higher than centre to focus more on face/upper body
-            x_start = (width - crop_width) // 2
-            # Move the vertical crop up a bit to better frame the face
-            y_start = (height - crop_height) // 2 - int(crop_height * 0.1)  # Shift up by 10% of crop height
+                # Convert frame to RGB for MediaPipe
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                results = self.pose.process(rgb_frame)
+
+                if results.pose_landmarks:
+                    # Get shoulder landmarks (11 and 12 in MediaPipe Pose model)
+                    left_shoulder = results.pose_landmarks.landmark[11]
+                    right_shoulder = results.pose_landmarks.landmark[12]
+
+                    # Calculate shoulder y-position (average of left and right)
+                    shoulder_y = (left_shoulder.y + right_shoulder.y) / 2
+                    shoulder_postions.append(shoulder_y)
+                
+                sample_count += 1
+
+                # Skip frames for efficiency
+                cap.set(cv2.CAP_PROP_POS_FRAMES, sample_count * (cap.get(cv2.CAP_PROP_FRAME_COUNT) // max_samples))
+
+            # Reset video capture to beginning
+            cap.release()
+            cap = cv2.VideoCapture(video_path)
+
+            # If no shouler is detected, fall back to simple cropping
+            if not shoulder_postions:
+                logger.warning("No shoulders detected, falling back to default cropping")
+                # Default to assuming shoulders are at 1/3 of the frame height
+                avg_shoulder_y = 0.33
+            else:
+                # Get Median should position to avoid outliers
+                shoulder_postions.sort()
+                avg_shoulder_y = shoulder_postions[len(shoulder_postions) // 2]
+
+            # Calculate crop dimensions
+            # Keep everything above shoulders plus a small margin
+            margin = 0.05 # 5% margin below shoulders
+
+            # Calculate crop region (y_start to include head , y_end just below shoulder)
+            y_start = 0 # Start from top of frame
+            y_end = int((avg_shoulder_y + margin) * height) # End just below shoulders
+
+            # For width, maintain aspect ratio or use full width if needed
+            target_aspect_ratio = 9/16 # Portrait aspect ratio
+            new_height = y_end - y_start
+
+            if new_height / width > target_aspect_ratio:
+                # Height is already dominant, use full width
+                x_start = 0
+                x_end = width
+            else:
+                # Maintain portrait aspect ratio by cropping width
+                new_width = int(new_height / target_aspect_ratio)
+                x_start = (width - new_width) // 2
+                x_end = x_start + new_width
 
             # Ensure we don't go out of bounds
             y_start = max(0, y_start)
-            y_end = min(height, y_start + crop_height)
-            x_end = min(width, x_start + crop_width)
+            y_end = min(height, y_end)
+            x_start = max(0, x_start)
+            x_end = min(width, x_end)
+
+            # Output dimensions
+            crop_width = x_end - x_start
+            crop_height = y_end - y_start
 
             # Create temporary output file
             temp_output = output_path.replace('.mp4', '_temp.mp4')
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out = cv2.VideoWriter(temp_output, fourcc, fps, (width,height)) # Keep original dimensions
+            out = cv2.VideoWriter(temp_output, fourcc, fps, (crop_width,crop_height)) # Keep original dimensions
 
             while True:
                 ret, frame = cap.read()
                 if not ret:
                     break
 
-                # Crop and zoom
+                # Crop frame to focus on upper body
                 cropped = frame[y_start:y_end, x_start:x_end]
-                # Resize back to original dimensions to create zoom effect
-                zoomed = cv2.resize(cropped, (width, height), interpolation=cv2.INTER_LINEAR)
-                out.write(zoomed)
+                out.write(cropped)
             
             cap.release()
             out.release()
@@ -207,6 +260,7 @@ class VideoProcessor:
         
         except Exception as e:
             logger.error(f"Error in video cropping: {str(e)}")
+            traceback.print_exc()
             return False
             
     def __del__(self):
@@ -417,18 +471,34 @@ class InferenceManager:
         with open(json_path, 'r') as f:
             data = json.load(f)
         
-        valid_videos = [
-            (video, scene) 
-            for video in data['videos'] 
-            if video.get('status') == 'Completed' and video.get('scenes')
-            for scene in video['scenes']
-            if float(scene['timing']['duration']) >= target_duration
-        ]
+        # Commenting out the random selection logic
         
-        if not valid_videos:
-            raise ValueError(f"No valid video scenes found with duration >= {target_duration}s")
+        # valid_videos = [
+        #     (video, scene) 
+        #     for video in data['videos'] 
+        #     if video.get('status') == 'Completed' and video.get('scenes')
+        #     for scene in video['scenes']
+        #     if float(scene['timing']['duration']) >= target_duration
+        # ]
+        
+        # if not valid_videos:
+        #     raise ValueError(f"No valid video scenes found with duration >= {target_duration}s")
             
-        video, scene = random.choice(valid_videos)
+        # video, scene = random.choice(valid_videos)
+        
+        # Always pick the specific video scene
+        target_video_filename = "0tdlR1rBwkM_scene_001.mp4"
+
+        # Find the specified video in the data
+        target_scene = None
+        for video in data['videos']:
+            if video.get('status') == 'Completed' and video.get('scenes'):
+                for scene in video['scenes']:
+                    if scene['video_file'] == target_video_filename:
+                        target_scene = scene
+                        break
+                if target_scene:
+                    break
         
         return {
             'video_file': scene['video_file'],
@@ -925,7 +995,7 @@ async def generate_video(
         inference_manager = InferenceManager()
         result = await inference_manager.process_inputs(
             audio_file,
-            "../YoutubeScrapper/Youtube_crawled/summary.json",
+            "Youtube_crawled/summary.json",
             reference_image=reference_image,
             fps=fps,
             steps=steps,
@@ -1091,7 +1161,11 @@ async def health_check():
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
+
+@app.get('/status')
+def status():
+    return JSONResponse(content={'response': 'Working...'})
+
 # Update the FastAPI endpoint to use the workflow
 @app.post("/generate_animated",
           summary="Generate and animate video from audio using full pipeline")
